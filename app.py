@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import pickle
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 from telegram import Update
@@ -8,9 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from openai import OpenAI
 import PyPDF2
 from docx import Document
-import chromadb
-from chromadb.config import Settings
-from chonkie import RecursiveChunker
+import numpy as np
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -25,18 +24,21 @@ client = OpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 
-# ChromaDB (локальное хранилище)
-chroma_client = chromadb.PersistentClient(
-    path="./chroma_db",
-    settings=Settings(anonymized_telemetry=False)
-)
-collection = chroma_client.get_or_create_collection(name="sp_docs")
+# Хранилище: {chat_id: [(chunk_text, embedding, source_name), ...]}
+store = {}
 
-# Чанкер
-chunker = RecursiveChunker()
 
-# Счётчик документов для каждого чата
-user_docs = {}
+def split_text(text, chunk_size=700, overlap=100):
+    """Простое разбиение текста на чанки."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end].strip()
+        if len(chunk) > 30:
+            chunks.append(chunk)
+        start = end - overlap
+    return chunks
 
 
 def extract_text_from_pdf(file_bytes):
@@ -52,15 +54,25 @@ def extract_text_from_docx(file_bytes):
     return "\n".join([para.text for para in doc.paragraphs])
 
 
+def get_embedding(text):
+    response = client.embeddings.create(
+        model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
+        input=text[:2000]
+    )
+    return response.data[0].embedding
+
+
+def cosine_similarity(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Я бот для поиска по СП (RAG-система).\n\n"
-        "Отправьте мне PDF или DOCX с последней редакцией. "
-        "Я разобью его на части и запомню. Можно загрузить несколько документов.\n\n"
-        "После загрузки задайте вопрос, и я найду ответ в загруженных документах.\n\n"
-        "Команды:\n"
-        "/list — список загруженных документов\n"
-        "/clear — очистить базу знаний"
+        "👋 Привет! Я бот для поиска по СП.\n\n"
+        "Отправьте PDF или DOCX. Можно загрузить несколько документов.\n\n"
+        "Команды:\n/list — список документов\n/clear — очистить всё"
     )
 
 
@@ -77,79 +89,63 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif file_name.lower().endswith('.docx'):
             text = extract_text_from_docx(file_bytes)
         else:
-            await update.message.reply_text("❌ Поддерживаются только PDF и DOCX.")
+            await update.message.reply_text("❌ Только PDF и DOCX.")
             return
 
-        # Разбиваем текст на чанки
-        chunks = [c.text for c in chunker(text) if len(c.text.strip()) > 20]
+        chunks = split_text(text)
         if not chunks:
-            await update.message.reply_text("❌ Не удалось извлечь текст из документа.")
+            await update.message.reply_text("❌ Не удалось извлечь текст.")
             return
 
-        await update.message.reply_text(
-            f"📄 Разбиваю «{file_name}» на {len(chunks)} частей и создаю эмбеддинги..."
-        )
+        await update.message.reply_text(f"📄 Обрабатываю «{file_name}» — {len(chunks)} частей...")
 
-        # Генерируем эмбеддинги через OpenRouter
-        embeddings = []
+        if chat_id not in store:
+            store[chat_id] = []
+
         for i, chunk in enumerate(chunks):
-            response = client.embeddings.create(
-                model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
-                input=chunk
-            )
-            embeddings.append(response.data[0].embedding)
-
+            emb = get_embedding(chunk)
+            store[chat_id].append((chunk, emb, file_name))
             if (i + 1) % 20 == 0:
-                await update.message.reply_text(f"⏳ Обработано {i+1}/{len(chunks)} частей...")
+                await update.message.reply_text(f"⏳ {i+1}/{len(chunks)}...")
 
-        # Сохраняем в ChromaDB
-        ids = [f"{chat_id}_{file_name}_{i}" for i in range(len(chunks))]
-        metadatas = [{"source": file_name, "chat_id": str(chat_id)} for _ in chunks]
-        collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
-
-        user_docs[chat_id] = user_docs.get(chat_id, 0) + 1
+        total = len(store[chat_id])
         await update.message.reply_text(
-            f"✅ Документ «{file_name}» добавлен в базу знаний!\n"
-            f"Всего документов: {user_docs[chat_id]}"
+            f"✅ «{file_name}» загружен. Всего частей в базе: {total}"
         )
     except Exception as e:
-        logging.error(f"Ошибка при обработке файла: {e}")
-        await update.message.reply_text("❌ Не удалось обработать файл. Попробуйте другой.")
+        logging.error(f"Ошибка файла: {e}")
+        await update.message.reply_text("❌ Ошибка при обработке файла.")
 
 
 async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     question = update.message.text
 
-    await update.message.reply_text("🤔 Ищу ответ в документах...")
+    if chat_id not in store or not store[chat_id]:
+        await update.message.reply_text("📭 Сначала загрузите документ.")
+        return
+
+    await update.message.reply_text("🤔 Ищу ответ...")
 
     try:
-        # Эмбеддинг для вопроса
-        question_embedding = client.embeddings.create(
-            model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
-            input=question
-        ).data[0].embedding
+        q_emb = get_embedding(question)
 
-        # Ищем 5 самых похожих чанков
-        results = collection.query(
-            query_embeddings=[question_embedding],
-            n_results=5,
-            where={"chat_id": str(chat_id)}
+        scored = []
+        for chunk, emb, source in store[chat_id]:
+            sim = cosine_similarity(q_emb, emb)
+            scored.append((sim, chunk, source))
+        scored.sort(reverse=True, key=lambda x: x[0])
+
+        top = scored[:5]
+        context_text = "\n\n---\n\n".join(
+            f"[{src}]\n{chunk}" for _, chunk, src in top
         )
 
-        if not results['documents'] or not results['documents'][0]:
-            await update.message.reply_text(
-                "📭 В базе нет документов по этому чату. Сначала загрузите СП."
-            )
-            return
+        prompt = f"""Ты эксперт по строительным нормативам (СП).
+Ответь на вопрос, опираясь ТОЛЬКО на фрагменты ниже.
+Если ответа нет — скажи об этом.
 
-        context_text = "\n\n---\n\n".join(results['documents'][0])
-
-        prompt = f"""Ты — эксперт по строительным нормативам (СП).
-Ответь на вопрос, опираясь ТОЛЬКО на приведённые ниже фрагменты документов.
-Если в них нет ответа, честно скажи об этом. В конце укажи, из каких источников взяты данные.
-
-Контекст:
+Фрагменты:
 {context_text}
 
 Вопрос: {question}
@@ -160,53 +156,33 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
-
-        answer = response.choices[0].message.content
-        await update.message.reply_text(answer)
+        await update.message.reply_text(response.choices[0].message.content)
 
     except Exception as e:
-        logging.error(f"Ошибка при обработке вопроса: {e}")
-        await update.message.reply_text("❌ Ошибка при обработке вопроса. Попробуйте позже.")
+        logging.error(f"Ошибка вопроса: {e}")
+        await update.message.reply_text("❌ Ошибка при обработке вопроса.")
 
 
 async def list_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    try:
-        results = collection.get(where={"chat_id": str(chat_id)})
-        sources = set()
-        for meta in results.get("metadatas", []):
-            if meta and "source" in meta:
-                sources.add(meta["source"])
-
-        if not sources:
-            await update.message.reply_text("📭 Пока нет загруженных документов.")
-            return
-
-        names = "\n".join(f"• {name}" for name in sorted(sources))
-        await update.message.reply_text(f"📚 Загружено документов ({len(sources)}):\n{names}")
-    except Exception as e:
-        logging.error(f"Ошибка /list: {e}")
-        await update.message.reply_text("❌ Не удалось получить список.")
+    if chat_id not in store or not store[chat_id]:
+        await update.message.reply_text("📭 Пусто.")
+        return
+    sources = sorted(set(item[2] for item in store[chat_id]))
+    names = "\n".join(f"• {s}" for s in sources)
+    await update.message.reply_text(f"📚 Документов ({len(sources)}):\n{names}")
 
 
 async def clear_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    try:
-        collection.delete(where={"chat_id": str(chat_id)})
-        user_docs[chat_id] = 0
-        await update.message.reply_text("🗑 Все документы удалены из базы знаний.")
-    except Exception as e:
-        logging.error(f"Ошибка /clear: {e}")
-        await update.message.reply_text("❌ Не удалось очистить базу.")
+    store[update.effective_chat.id] = []
+    await update.message.reply_text("🗑 Очищено.")
 
 
-# --- Health-сервер для Render (чтобы видел открытый порт) ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
-
     def log_message(self, format, *args):
         pass
 
@@ -218,9 +194,7 @@ def run_health_server():
 
 
 def main():
-    # Запускаем health-сервер в фоне
     threading.Thread(target=run_health_server, daemon=True).start()
-
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("list", list_docs))
