@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 from io import BytesIO
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -9,25 +8,34 @@ import PyPDF2
 from docx import Document
 import chromadb
 from chromadb.config import Settings
-from snipsplit import Chunker
+from chonkie import RecursiveChunker
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# Инициализация клиента для эмбеддингов и чата
-client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
-# Настройка ChromaDB (локальное хранилище)
-chroma_client = chromadb.PersistentClient(path="./chroma_db", settings=Settings(anonymized_telemetry=False))[citation:9]
+# ChromaDB (локальное хранилище)
+chroma_client = chromadb.PersistentClient(
+    path="./chroma_db",
+    settings=Settings(anonymized_telemetry=False)
+)
 collection = chroma_client.get_or_create_collection(name="sp_docs")
 
-# Чанкер для разбиения текста (512 токенов, перекрытие 64)
-chunker = Chunker(max_tokens=512, overlap_tokens=64)[citation:5]
+# Чанкер
+chunker = RecursiveChunker()
 
 # Счётчик документов для каждого чата
 user_docs = {}
+
 
 def extract_text_from_pdf(file_bytes):
     text = ""
@@ -36,17 +44,23 @@ def extract_text_from_pdf(file_bytes):
         text += page.extract_text() or ""
     return text
 
+
 def extract_text_from_docx(file_bytes):
     doc = Document(BytesIO(file_bytes))
     return "\n".join([para.text for para in doc.paragraphs])
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я бот для поиска по СП (RAG-система).\n\n"
         "Отправьте мне PDF или DOCX с последней редакцией. "
         "Я разобью его на части и запомню. Можно загрузить несколько документов.\n\n"
-        "После загрузки задайте вопрос, и я найду ответ в загруженных документах."
+        "После загрузки задайте вопрос, и я найду ответ в загруженных документах.\n\n"
+        "Команды:\n"
+        "/list — список загруженных документов\n"
+        "/clear — очистить базу знаний"
     )
+
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
@@ -65,23 +79,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Разбиваем текст на чанки
-        chunks = [c.text for c in chunker.split(text) if len(c.text.strip()) > 20]
+        chunks = [c.text for c in chunker(text) if len(c.text.strip()) > 20]
         if not chunks:
             await update.message.reply_text("❌ Не удалось извлечь текст из документа.")
             return
 
-        await update.message.reply_text(f"📄 Разбиваю «{file_name}» на {len(chunks)} частей и создаю эмбеддинги...")
+        await update.message.reply_text(
+            f"📄 Разбиваю «{file_name}» на {len(chunks)} частей и создаю эмбеддинги..."
+        )
 
-        # Генерируем эмбеддинги через OpenRouter (бесплатная модель)
+        # Генерируем эмбеддинги через OpenRouter
         embeddings = []
-        for i, chunk in enumerate(chunks):
-            response = client.embeddings.create(
+        for i., chunk in enumerate(chunks):
+            response = clientembeddings.create(
                 model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
                 input=chunk
             )
             embeddings.append(response.data[0].embedding)
 
-            # Обновляем прогресс каждые 20 чанков
             if (i + 1) % 20 == 0:
                 await update.message.reply_text(f"⏳ Обработано {i+1}/{len(chunks)} частей...")
 
@@ -91,10 +106,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
 
         user_docs[chat_id] = user_docs.get(chat_id, 0) + 1
-        await update.message.reply_text(f"✅ Документ «{file_name}» добавлен в базу знаний! Всего документов: {user_docs[chat_id]}")
+        await update.message.reply_text(
+            f"✅ Документ «{file_name}» добавлен в базу знаний!\n"
+            f"Всего документов: {user_docs[chat_id]}"
+        )
     except Exception as e:
         logging.error(f"Ошибка при обработке файла: {e}")
         await update.message.reply_text("❌ Не удалось обработать файл. Попробуйте другой.")
+
 
 async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -103,13 +122,13 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤔 Ищу ответ в документах...")
 
     try:
-        # Генерируем эмбеддинг для вопроса
+        # Эмбеддинг для вопроса
         question_embedding = client.embeddings.create(
             model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
             input=question
         ).data[0].embedding
 
-        # Ищем 5 самых похожих чанков в ChromaDB
+        # Ищем 5 самых похожих чанков
         results = collection.query(
             query_embeddings=[question_embedding],
             n_results=5,
@@ -117,15 +136,16 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not results['documents'] or not results['documents'][0]:
-            await update.message.reply_text("📭 В базе нет документов по этому чату. Сначала загрузите СП.")
+            await update.message.reply_text(
+                "📭 В базе нет документов по этому чату. Сначала загрузите СП."
+            )
             return
 
-        # Собираем контекст
         context_text = "\n\n---\n\n".join(results['documents'][0])
 
         prompt = f"""Ты — эксперт по строительным нормативам (СП).
 Ответь на вопрос, опираясь ТОЛЬКО на приведённые ниже фрагменты документов.
-Если в них нет ответа, скажи об этом. В конце укажи, из каких источников взяты данные.
+Если в них нет ответа, честно скажи об этом. В конце укажи, из каких источников взяты данные.
 
 Контекст:
 {context_text}
@@ -133,7 +153,6 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Вопрос: {question}
 """
 
-        # Отправляем в ИИ
         response = client.chat.completions.create(
             model="openrouter/free",
             messages=[{"role": "user", "content": prompt}],
@@ -147,12 +166,47 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Ошибка при обработке вопроса: {e}")
         await update.message.reply_text("❌ Ошибка при обработке вопроса. Попробуйте позже.")
 
+
+async def list_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    try:
+        results = collection.get(where={"chat_id": str(chat_id)})
+        sources = set()
+        for meta in results.get("metadatas", []):
+            if meta and "source" in meta:
+                sources.add(meta["source"])
+
+        if not sources:
+            await update.message.reply_text("📭 Пока нет загруженных документов.")
+            return
+
+        names = "\n".join(f"• {name}" for name in sorted(sources))
+        await update.message.reply_text(f"📚 Загружено документов ({len(sources)}):\n{names}")
+    except Exception as e:
+        logging.error(f"Ошибка /list: {e}")
+        await update.message.reply_text("❌ Не удалось получить список.")
+
+
+async def clear_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    try:
+        collection.delete(where={"chat_id": str(chat_id)})
+        user_docs[chat_id] = 0
+        await update.message.reply_text("🗑 Все документы удалены из базы знаний.")
+    except Exception as e:
+        logging.error(f"Ошибка /clear: {e}")
+        await update.message.reply_text("❌ Не удалось очистить базу.")
+
+
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("list", list_docs))
+    application.add_handler(CommandHandler("clear", clear_docs))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
-    application.run_polling(allowed_updates=Update.ALL_TYPES)[citation:11]
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
