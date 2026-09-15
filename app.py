@@ -90,7 +90,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Генерируем эмбеддинги через OpenRouter
         embeddings = []
-        for i., chunk in enumerate(chunks):
+        for i, chunk in enumerate(chunks):
             response = clientembeddings.create(
                 model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
                 input=chunk
