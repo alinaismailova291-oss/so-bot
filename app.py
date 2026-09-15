@@ -37,10 +37,8 @@ def extract_text_from_docx(file_bytes):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Я бот для поиска по СП.\n\n"
-        "1. Отправь мне файл (PDF или DOCX) с последней редакцией.\n"
-        "2. После загрузки задай любой вопрос по документу.\n\n"
-        "Я отвечу, опираясь только на загруженный текст."
+        "Привет! Я бот для поиска по СП.\n\n"
+        "Отправь мне PDF или DOCX с последней редакцией и задай вопрос."
     )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,41 +53,38 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif file_name.lower().endswith('.docx'):
             text = extract_text_from_docx(file_bytes)
         else:
-            await update.message.reply_text("❌ Поддерживаются только PDF и DOCX.")
+            await update.message.reply_text("Поддерживаются только PDF и DOCX.")
             return
 
         documents[update.effective_chat.id] = text
-        await update.message.reply_text(
-            f"✅ Документ «{file_name}» загружен! Теперь задайте вопрос."
-        )
+        await update.message.reply_text(f"Документ «{file_name}» загружен. Задайте вопрос.")
     except Exception as e:
         logging.error(f"Ошибка при обработке файла: {e}")
-        await update.message.reply_text("❌ Не удалось обработать файл. Попробуйте другой.")
+        await update.message.reply_text("Не удалось обработать файл.")
 
 async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     question = update.message.text
 
     if chat_id not in documents:
-        await update.message.reply_text("⚠️ Сначала загрузите документ (PDF или DOCX).")
+        await update.message.reply_text("Сначала загрузите документ.")
         return
 
     doc_text = documents[chat_id]
     max_chars = 12000
     if len(doc_text) > max_chars:
-        doc_text = doc_text[:max_chars] + "\n...[текст обрезан]..."
+        doc_text = doc_text[:max_chars] + "\n...[обрезано]..."
 
-    prompt = f"""Ты — помощник по строительным нормативам (СП).
-Ответь на вопрос пользователя, опираясь ТОЛЬКО на следующий текст документа.
-Если ответа в тексте нет, честно скажи об этом.
+    prompt = f"""Ты помощник по строительным нормативам (СП).
+Ответь на вопрос, опираясь ТОЛЬКО на текст ниже. Если ответа нет — скажи об этом.
 
-Текст документа:
+Текст:
 {doc_text}
 
 Вопрос: {question}
 """
 
-    await update.message.reply_text("🤔 Думаю...")
+    await update.message.reply_text("Думаю...")
 
     try:
         response = client.chat.completions.create(
@@ -97,11 +92,10 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
-        answer = response.choices[0].message.content
-        await update.message.reply_text(answer)
+        await update.message.reply_text(response.choices[0].message.content)
     except Exception as e:
-        logging.error(f"Ошибка при запросе к ИИ: {e}")
-        await update.message.reply_text("❌ Ошибка при обращении к ИИ. Попробуйте позже.")
+        logging.error(f"Ошибка ИИ: {e}")
+        await update.message.reply_text("Ошибка при обращении к ИИ.")
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -118,7 +112,6 @@ def run_health_server():
 
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
-
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
