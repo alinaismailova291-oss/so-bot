@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -91,7 +93,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Генерируем эмбеддинги через OpenRouter
         embeddings = []
         for i, chunk in enumerate(chunks):
-            response = clientembeddings.create(
+            response = client.embeddings.create(
                 model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
                 input=chunk
             )
@@ -198,7 +200,27 @@ async def clear_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Не удалось очистить базу.")
 
 
+# --- Health-сервер для Render (чтобы видел открытый порт) ---
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
 def main():
+    # Запускаем health-сервер в фоне
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("list", list_docs))
