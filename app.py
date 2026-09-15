@@ -1,7 +1,7 @@
 import os
 import logging
 import threading
-import pickle
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
 from telegram import Update
@@ -102,15 +102,28 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat_id not in store:
             store[chat_id] = []
 
+        success_count = 0
         for i, chunk in enumerate(chunks):
-            emb = get_embedding(chunk)
-            store[chat_id].append((chunk, emb, file_name))
+            try:
+                emb = get_embedding(chunk)
+                store[chat_id].append((chunk, emb, file_name))
+                success_count += 1
+            except Exception as e:
+                logging.error(f"Ошибка на чанке {i}: {e}")
+                # Пропускаем проблемный чанк, продолжаем
+                continue
+
+            # Пауза между запросами, чтобы не упереться в rate limit
+            await asyncio.sleep(1.5)
+
             if (i + 1) % 20 == 0:
                 await update.message.reply_text(f"⏳ {i+1}/{len(chunks)}...")
 
         total = len(store[chat_id])
         await update.message.reply_text(
-            f"✅ «{file_name}» загружен. Всего частей в базе: {total}"
+            f"✅ «{file_name}» загружен.\n"
+            f"Обработано частей: {success_count}/{len(chunks)}\n"
+            f"Всего частей в базе: {total}"
         )
     except Exception as e:
         logging.error(f"Ошибка файла: {e}")
