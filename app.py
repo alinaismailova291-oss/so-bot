@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from io import BytesIO
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -8,7 +9,10 @@ import PyPDF2
 from docx import Document
 
 # Настройка логирования
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 # Получаем ключи из переменных окружения
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -21,7 +25,6 @@ client = OpenAI(
 )
 
 # Хранилище текста документов (в памяти, для простоты)
-# В будущем можно заменить на базу данных
 documents = {}
 
 # Функция извлечения текста из PDF
@@ -62,10 +65,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Поддерживаются только PDF и DOCX.")
             return
 
-        # Сохраняем текст в память (ключ — ID чата)
         documents[update.effective_chat.id] = text
-        await update.message.reply_text(f"✅ Документ «{file_name}» загружен! Теперь задайте вопрос.")
-
+        await update.message.reply_text(
+            f"✅ Документ «{file_name}» загружен! Теперь задайте вопрос."
+        )
     except Exception as e:
         logging.error(f"Ошибка при обработке файла: {e}")
         await update.message.reply_text("❌ Не удалось обработать файл. Попробуйте другой.")
@@ -80,7 +83,6 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     doc_text = documents[chat_id]
-    # Ограничиваем длину текста, чтобы не превысить лимиты бесплатной модели
     max_chars = 12000
     if len(doc_text) > max_chars:
         doc_text = doc_text[:max_chars] + "\n...[текст обрезан]..."
@@ -99,7 +101,7 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = client.chat.completions.create(
-            model="openrouter/free",  # Автоматический выбор бесплатной модели
+            model="openrouter/free",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
         )
@@ -110,14 +112,20 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка при обращении к ИИ. Попробуйте позже.")
 
 # Точка входа
-def main():
+async def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
 
-    application.run_polling()
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # Держим бота запущенным
+    stop_signal = asyncio.Event()
+    await stop_signal.wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
