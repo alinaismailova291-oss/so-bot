@@ -1,6 +1,5 @@
 import os
 import logging
-import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from io import BytesIO
@@ -104,14 +103,13 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Ошибка при запросе к ИИ: {e}")
         await update.message.reply_text("❌ Ошибка при обращении к ИИ. Попробуйте позже.")
 
-# Простой HTTP-сервер, чтобы Render видел открытый порт
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, format, *args):
-        pass  # не засоряем логи
+        pass
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -119,7 +117,6 @@ def run_health_server():
     server.serve_forever()
 
 def main():
-    # Запускаем health-check сервер в отдельном потоке
     threading.Thread(target=run_health_server, daemon=True).start()
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
