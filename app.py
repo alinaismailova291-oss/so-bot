@@ -20,21 +20,19 @@ logging.basicConfig(
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# Клиент OpenRouter (только для генерации ответов)
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
 
-# Локальная модель для эмбеддингов (скачается автоматически при первом запуске)
-embedding_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+# Лёгкая модель эмбеддингов (~90 МБ, влезает в 512 МБ RAM)
+embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
 # Хранилище: {chat_id: [(chunk_text, embedding, source_name), ...]}
 store = {}
 
 
 def split_text(text, chunk_size=700, overlap=100):
-    """Простое разбиение текста на чанки."""
     chunks = []
     start = 0
     while start < len(text):
@@ -60,7 +58,6 @@ def extract_text_from_docx(file_bytes):
 
 
 def get_embedding(text):
-    # Локальные эмбеддинги через fastembed (без интернета и лимитов)
     return list(embedding_model.embed([text]))[0].tolist()
 
 
@@ -105,7 +102,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             store[chat_id] = []
 
         for i, chunk in enumerate(chunks):
-            # Локальные эмбеддинги — работают мгновенно, без пауз
             emb = get_embedding(chunk)
             store[chat_id].append((chunk, emb, file_name))
 
