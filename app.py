@@ -10,6 +10,7 @@ from openai import OpenAI
 import PyPDF2
 from docx import Document
 import numpy as np
+from fastembed import TextEmbedding
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -19,10 +20,14 @@ logging.basicConfig(
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
+# Клиент OpenRouter (только для генерации ответов)
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
+
+# Локальная модель для эмбеддингов (скачается автоматически при первом запуске)
+embedding_model = TextEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
 # Хранилище: {chat_id: [(chunk_text, embedding, source_name), ...]}
 store = {}
@@ -55,11 +60,8 @@ def extract_text_from_docx(file_bytes):
 
 
 def get_embedding(text):
-    response = client.embeddings.create(
-        model="nvidia/llama-nemotron-embed-vl-1b-v2:free",
-        input=text[:2000]
-    )
-    return response.data[0].embedding
+    # Локальные эмбеддинги через fastembed (без интернета и лимитов)
+    return list(embedding_model.embed([text]))[0].tolist()
 
 
 def cosine_similarity(a, b):
@@ -102,19 +104,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat_id not in store:
             store[chat_id] = []
 
-        success_count = 0
         for i, chunk in enumerate(chunks):
-            try:
-                emb = get_embedding(chunk)
-                store[chat_id].append((chunk, emb, file_name))
-                success_count += 1
-            except Exception as e:
-                logging.error(f"Ошибка на чанке {i}: {e}")
-                # Пропускаем проблемный чанк, продолжаем
-                continue
-
-            # Пауза между запросами, чтобы не упереться в rate limit
-            await asyncio.sleep(1.5)
+            # Локальные эмбеддинги — работают мгновенно, без пауз
+            emb = get_embedding(chunk)
+            store[chat_id].append((chunk, emb, file_name))
 
             if (i + 1) % 20 == 0:
                 await update.message.reply_text(f"⏳ {i+1}/{len(chunks)}...")
@@ -122,7 +115,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = len(store[chat_id])
         await update.message.reply_text(
             f"✅ «{file_name}» загружен.\n"
-            f"Обработано частей: {success_count}/{len(chunks)}\n"
             f"Всего частей в базе: {total}"
         )
     except Exception as e:
